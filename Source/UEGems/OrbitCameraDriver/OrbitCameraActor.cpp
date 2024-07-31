@@ -3,16 +3,16 @@
 
 #include "OrbitCameraActor.h"
 
-#include "OrbitCameraDebugDrawComponent.h"
 #include "Camera/CameraComponent.h"
-#include "Components/ArrowComponent.h"
 #include "Misc/DataValidation.h"
+#include "OrbitCameraDebugDrawComponent.h"
+#include "Runtime/CinematicCamera/Public/CineCameraComponent.h"
 
-static FVector SphericalToCartesian(const float AzimuthalAngleRads, const float PolarAngleRads, const FVector& EllipsoidSemiAxesLengths)
+static FVector SphericalToCartesian(const float AzimuthalAngleDeg, const float PolarAngleDeg, const FVector& EllipsoidSemiAxesLengths)
 {
 	float SinPolar, CosPolar, SinAzimuthal, CosAzimuthal;
-	FMath::SinCos(&SinPolar, &CosPolar, PolarAngleRads);
-	FMath::SinCos(&SinAzimuthal, &CosAzimuthal, AzimuthalAngleRads);
+	FMath::SinCos(&SinPolar, &CosPolar, FMath::DegreesToRadians(PolarAngleDeg));
+	FMath::SinCos(&SinAzimuthal, &CosAzimuthal, FMath::DegreesToRadians(AzimuthalAngleDeg));
 
 	return FVector(
 		EllipsoidSemiAxesLengths.X * SinPolar * CosAzimuthal,
@@ -25,17 +25,11 @@ AOrbitCameraActor::AOrbitCameraActor()
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("SceneComponent"));;
 	
 	// Setup camera defaults
-	CameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("CameraComponent"));
-	CameraComponent->FieldOfView = 90.0f;
-	CameraComponent->bConstrainAspectRatio = true;
-	CameraComponent->AspectRatio = 1.777778f;
-	CameraComponent->PostProcessBlendWeight = 1.0f;
-	
+	CameraComponent = CreateDefaultSubobject<UCineCameraComponent>(TEXT("CameraComponent"));
 	CameraComponent->SetupAttachment(RootComponent);
 	
 #if WITH_EDITORONLY_DATA
-	DebugDrawComponent = CreateEditorOnlyDefaultSubobject<UOrbitCameraDebugDrawComponent>(TEXT("DebugDrawComponent"));
-	if (DebugDrawComponent)
+	if (DebugDrawComponent = CreateEditorOnlyDefaultSubobject<UOrbitCameraDebugDrawComponent>(TEXT("DebugDrawComponent")))
 	{
 		DebugDrawComponent->SetupAttachment(RootComponent);
 	}
@@ -46,28 +40,37 @@ void AOrbitCameraActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	RecalculateOrbitPosition();
+	RecalculateCameraPosition();
 }
 
-
-
-void AOrbitCameraActor::SetCameraOrbitPosition(const float InHorizontalAngle, const float InVerticalAngle)
+void AOrbitCameraActor::SetCameraAngles(const float InHorizontalAngleDeg, const float InVerticalAngleDeg)
 {
-	HorizontalAngle = InHorizontalAngle;
-	VerticalAngle = FMath::Clamp(InVerticalAngle, VerticalRotationLimit.X, VerticalRotationLimit.Y);
+	HorizontalAngleDeg = InHorizontalAngleDeg;
+	VerticalAngleDeg = FMath::Clamp(InVerticalAngleDeg, VerticalAngleLimitDeg.X, VerticalAngleLimitDeg.Y);
 	
-	RecalculateOrbitPosition();
+	RecalculateCameraPosition();
 }
 
-void AOrbitCameraActor::IncrementCameraOrbitPosition(const float InHorizontalAngleDelta, const float InVerticalAngleDelta)
+void AOrbitCameraActor::IncrementCameraAngles(const float InHorizontalAngleDelta, const float InVerticalAngleDelta)
 {
-	HorizontalAngle += InHorizontalAngleDelta;
-	VerticalAngle = FMath::Clamp(VerticalAngle + InVerticalAngleDelta, VerticalRotationLimit.X, VerticalRotationLimit.Y);
+	HorizontalAngleDeg += InHorizontalAngleDelta;
+	VerticalAngleDeg = FMath::Clamp(VerticalAngleDeg + InVerticalAngleDelta, VerticalAngleLimitDeg.X, VerticalAngleLimitDeg.Y);
 	
-	RecalculateOrbitPosition();
+	RecalculateCameraPosition();
 }
 
-void AOrbitCameraActor::RecalculateOrbitPosition()
+void AOrbitCameraActor::SetEllipsoidSize(const FVector& InEllipsoidSize)
+{
+	EllipsoidSize = InEllipsoidSize;
+
+	RecalculateCameraPosition();
+	if (DebugDrawComponent)
+	{
+		DebugDrawComponent->MarkRenderStateDirty();	
+	}
+}
+
+void AOrbitCameraActor::RecalculateCameraPosition()
 {
 	if (!ensureAlwaysMsgf(EllipsoidSize.X > 0.f && EllipsoidSize.Y > 0.f && EllipsoidSize.Z > 0.f, TEXT("Ellipsoid is degenerated")))
 	{
@@ -75,7 +78,7 @@ void AOrbitCameraActor::RecalculateOrbitPosition()
 	}
 
 	const FVector EllipsoidSemiAxesLengths = EllipsoidSize / 2.f; 
-	const FVector CameraPosition = SphericalToCartesian(HorizontalAngle, VerticalAngle, EllipsoidSemiAxesLengths);
+	const FVector CameraPosition = SphericalToCartesian(HorizontalAngleDeg, VerticalAngleDeg, EllipsoidSemiAxesLengths);
 
 	const FVector XAxis = -CameraPosition.GetSafeNormal();
 	const FVector YAxis = (FVector::UpVector ^ XAxis).GetSafeNormal();
@@ -91,30 +94,45 @@ void AOrbitCameraActor::RecalculateOrbitPosition()
 void AOrbitCameraActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
-	DebugDrawComponent->MarkRenderStateDirty();
-	RecalculateOrbitPosition();
+	if (DebugDrawComponent)
+	{
+		DebugDrawComponent->MarkRenderStateDirty();	
+	}
 }
 
 void AOrbitCameraActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
+#if WITH_EDITORONLY_DATA
+	if (PropertyChangedEvent.MemberProperty && PropertyChangedEvent.MemberProperty->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, VerticalAngleLimitDeg))
+	{
+		if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(FVector, X))
+		{
+			VerticalAngleLimitDeg.X = FMath::Clamp(VerticalAngleLimitDeg.X, 0.f, VerticalAngleLimitDeg.Y);
+		}
+		else if(PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(FVector, Y))
+		{
+			VerticalAngleLimitDeg.Y = FMath::Clamp(VerticalAngleLimitDeg.Y, VerticalAngleLimitDeg.X, 180.f);
+		}
+		RecalculateCameraPosition();
+	}
+#endif
+	
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
 #if WITH_EDITORONLY_DATA
-	if (const FProperty* Prop = PropertyChangedEvent.MemberProperty)
+	if (PropertyChangedEvent.MemberProperty && PropertyChangedEvent.MemberProperty->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, EllipsoidSize))
 	{
-		if (Prop->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, EllipsoidSize))
+		RecalculateCameraPosition();
+		if (DebugDrawComponent)
 		{
-			RecalculateOrbitPosition();
-			DebugDrawComponent->MarkRenderStateDirty();
+			DebugDrawComponent->MarkRenderStateDirty();	
 		}
 	}
-	if (const FProperty* Prop = PropertyChangedEvent.Property)
+	if (PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, HorizontalAngleDeg) || PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, VerticalAngleDeg))
 	{
-		if (Prop->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, HorizontalAngle) || PropertyChangedEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(AOrbitCameraActor, VerticalAngle))
-		{
-			SetCameraOrbitPosition(HorizontalAngle, VerticalAngle);
-		}
+		RecalculateCameraPosition();
 	}
+	
 #endif
 }
 
@@ -122,7 +140,7 @@ void AOrbitCameraActor::PostLoad()
 {
 	Super::PostLoad();
 
-	RecalculateOrbitPosition();
+	RecalculateCameraPosition();
 }
 
 EDataValidationResult AOrbitCameraActor::IsDataValid(FDataValidationContext& Context)
@@ -132,7 +150,7 @@ EDataValidationResult AOrbitCameraActor::IsDataValid(FDataValidationContext& Con
 	bool bIsDataInvalid = false;
 	if (EllipsoidSize.X <= 0.f || EllipsoidSize.Y <= 0.f || EllipsoidSize.Z <= 0.f)
 	{
-		Context.AddError(INVTEXT("Ellipsoid is degenerated"));
+		Context.AddError(INVTEXT("Ellipsoid has degenerated"));
 		bIsDataInvalid = true;
 	}
 	
